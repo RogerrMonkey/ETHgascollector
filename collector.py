@@ -1,98 +1,119 @@
+import os
 import requests
 import psycopg2
-from datetime import datetime
 import time
+from datetime import datetime, timezone
 
 # Infura endpoint
 INFURA_URL = "https://mainnet.infura.io/v3/ab261d9c903d4bd1944bc549681c3d68"
 
-# Supabase DB connection details
+# PostgreSQL credentials from Railway environment variables
 DB_CONFIG = {
-    "dbname": "postgres",
-    "user": "postgres",
-    "password": "Q-u3ABq6R9f.?ah",
-    "host": "db.rtxjctlneutglbghqvby.supabase.co",
-    "port": 5432,
-    "sslmode": "require"
+    'host': os.getenv("DB_HOST"),
+    'port': os.getenv("DB_PORT", "5432"),
+    'dbname': os.getenv("DB_NAME"),
+    'user': os.getenv("DB_USER"),
+    'password': os.getenv("DB_PASSWORD"),
+    'sslmode': os.getenv("DB_SSLMODE", "require")
 }
 
-def get_block(block_tag="latest"):
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "eth_getBlockByNumber",
-        "params": [block_tag, True]
-    }
-    response = requests.post(INFURA_URL, json=payload)
-    response.raise_for_status()
-    return response.json()["result"]
-
-def save_to_db(data):
+# -------------------------
+# DATABASE SETUP
+# -------------------------
+def init_db():
+    """Create the gas_fees table if it doesn't exist."""
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
-    
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS gas_fee_data (
+        CREATE TABLE IF NOT EXISTS gas_fees (
             id SERIAL PRIMARY KEY,
-            timestamp TIMESTAMP,
-            blockNumber BIGINT,
-            baseFee_Gwei FLOAT,
-            avgPriorityFee_Gwei FLOAT,
-            gasUsed BIGINT,
-            gasLimit BIGINT,
-            mempoolTxCount INT
-        );
+            block_number BIGINT,
+            gas_price NUMERIC,
+            gas_limit NUMERIC,
+            timestamp TIMESTAMP
+        )
     """)
-    
-    cur.execute("""
-        INSERT INTO gas_fee_data (timestamp, blockNumber, baseFee_Gwei, avgPriorityFee_Gwei, gasUsed, gasLimit, mempoolTxCount)
-        VALUES (%s,%s,%s,%s,%s,%s,%s)
-    """, (
-        data["timestamp"],
-        data["blockNumber"],
-        data["baseFee_Gwei"],
-        data["avgPriorityFee_Gwei"],
-        data["gasUsed"],
-        data["gasLimit"],
-        data["mempoolTxCount"]
-    ))
-    
     conn.commit()
     cur.close()
     conn.close()
+    print("✅ Database initialized (table ready).")
 
-def collect_data():
-    latest_block = get_block("latest")
-    pending_block = get_block("pending")  # For mempool size
-    
-    block_number = int(latest_block["number"], 16)
-    timestamp = datetime.utcfromtimestamp(int(latest_block["timestamp"], 16))
-    base_fee = int(latest_block.get("baseFeePerGas", "0x0"), 16) / 1e9  # in Gwei
-    gas_used = int(latest_block["gasUsed"], 16)
-    gas_limit = int(latest_block["gasLimit"], 16)
-    
-    tips = [
-        int(tx.get("maxPriorityFeePerGas", "0x0"), 16) / 1e9
-        for tx in latest_block["transactions"] if "maxPriorityFeePerGas" in tx
-    ]
-    avg_priority_fee = sum(tips) / len(tips) if tips else 0
-    
-    mempool_size = len(pending_block["transactions"]) if pending_block else None
-    
-    row = {
-        "timestamp": timestamp,
-        "blockNumber": block_number,
-        "baseFee_Gwei": base_fee,
-        "avgPriorityFee_Gwei": avg_priority_fee,
-        "gasUsed": gas_used,
-        "gasLimit": gas_limit,
-        "mempoolTxCount": mempool_size
+
+# -------------------------
+# SAVE TO DB
+# -------------------------
+def save_to_db(row):
+    """Insert gas fee record into the database."""
+    conn = psycopg2.connect(**DB_CONFIG)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO gas_fees (block_number, gas_price, gas_limit, timestamp)
+        VALUES (%s, %s, %s, %s)
+    """, (row["block_number"], row["gas_price"], row["gas_limit"], row["timestamp"]))
+    conn.commit()
+    cur.close()
+    conn.close()
+    print(f"💾 Saved block {row['block_number']} to DB")
+
+
+# -------------------------
+# FETCH LATEST BLOCK DATA
+# -------------------------
+def get_latest_block():
+    """Fetch latest block details from Ethereum blockchain via Infura."""
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "eth_getBlockByNumber",
+        "params": ["latest", True],
+        "id": 1
     }
-    
-    save_to_db(row)
-    print(f"Block {block_number} | Base: {base_fee:.2f} Gwei | Tip: {avg_priority_fee:.2f} Gwei | Mempool: {mempool_size}")
+    response = requests.post(INFURA_URL, json=payload)
+    data = response.json()
+
+    if "result" not in data or not data["result"]:
+        raise Exception("❌ Could not fetch latest block data.")
+
+    block = data["result"]
+
+    block_number = int(block["number"], 16)
+    gas_limit = int(block["gasLimit"], 16)
+
+    # Calculate average gas price from transactions
+    gas_prices = []
+    for tx in block["transactions"]:
+        if "gasPrice" in tx:
+            gas_prices.append(int(tx["gasPrice"], 16))
+
+    avg_gas_price = sum(gas_prices) / len(gas_prices) if gas_prices else 0
+
+    timestamp = datetime.fromtimestamp(int(block["timestamp"], 16), tz=timezone.utc)
+
+    return {
+        "block_number": block_number,
+        "gas_price": avg_gas_price,
+        "gas_limit": gas_limit,
+        "timestamp": timestamp
+    }
+
+
+# -------------------------
+# MAIN COLLECTION LOOP
+# -------------------------
+def collect_data():
+    """Continuously fetch and store Ethereum gas fee data every minute."""
+    print("🚀 Starting Ethereum gas fee collector...")
+    init_db()
+
+    while True:
+        try:
+            latest_block_data = get_latest_block()
+            save_to_db(latest_block_data)
+        except Exception as e:
+            print(f"❌ Error collecting data: {e}")
+
+        print("⏳ Waiting 60 seconds before next fetch...\n")
+        time.sleep(60)  # wait for 1 minute
+
 
 if __name__ == "__main__":
-    while True:
-        collect_data()
-        time.sleep(12)  # ~1 Ethereum block
+    collect_data()
