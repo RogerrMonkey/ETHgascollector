@@ -1,119 +1,96 @@
 import os
-import requests
 import psycopg2
-import time
+import requests
 from datetime import datetime, timezone
+from decimal import Decimal
 
-# Infura endpoint
-INFURA_URL = "https://mainnet.infura.io/v3/ab261d9c903d4bd1944bc549681c3d68"
-
-# PostgreSQL credentials from Railway environment variables
+# ==============================
+# Database Config (Railway ENV)
+# ==============================
 DB_CONFIG = {
-    'host': os.getenv("DB_HOST"),
-    'port': os.getenv("DB_PORT", "5432"),
-    'dbname': os.getenv("DB_NAME"),
-    'user': os.getenv("DB_USER"),
-    'password': os.getenv("DB_PASSWORD"),
-    'sslmode': os.getenv("DB_SSLMODE", "require")
+    "dbname": os.getenv("PGDATABASE", "postgres"),
+    "user": os.getenv("PGUSER", "postgres"),
+    "password": os.getenv("PGPASSWORD"),
+    "host": os.getenv("PGHOST", "localhost"),
+    "port": os.getenv("PGPORT", 5432)
 }
 
-# -------------------------
-# DATABASE SETUP
-# -------------------------
+# ==============================
+# Infura Config
+# ==============================
+INFURA_URL = "https://mainnet.infura.io/v3/ab261d9c903d4bd1944bc549681c3d68"
+
+# ==============================
+# DB Setup
+# ==============================
 def init_db():
-    """Create the gas_fees table if it doesn't exist."""
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS gas_fees (
             id SERIAL PRIMARY KEY,
-            block_number BIGINT,
-            gas_price NUMERIC,
+            timestamp TIMESTAMP NOT NULL,
+            base_fee_gwei NUMERIC,
+            gas_used NUMERIC,
             gas_limit NUMERIC,
-            timestamp TIMESTAMP
+            transactions_count INTEGER
         )
     """)
     conn.commit()
     cur.close()
     conn.close()
-    print("✅ Database initialized (table ready).")
+    print("✅ Database initialized or already exists.")
 
-
-# -------------------------
-# SAVE TO DB
-# -------------------------
+# ==============================
+# Save Data to DB
+# ==============================
 def save_to_db(row):
-    """Insert gas fee record into the database."""
     conn = psycopg2.connect(**DB_CONFIG)
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO gas_fees (block_number, gas_price, gas_limit, timestamp)
-        VALUES (%s, %s, %s, %s)
-    """, (row["block_number"], row["gas_price"], row["gas_limit"], row["timestamp"]))
+        INSERT INTO gas_fees (timestamp, base_fee_gwei, gas_used, gas_limit, transactions_count)
+        VALUES (%s, %s, %s, %s, %s)
+    """, row)
     conn.commit()
     cur.close()
     conn.close()
-    print(f"💾 Saved block {row['block_number']} to DB")
+    print(f"💾 Data saved: {row}")
 
-
-# -------------------------
-# FETCH LATEST BLOCK DATA
-# -------------------------
-def get_latest_block():
-    """Fetch latest block details from Ethereum blockchain via Infura."""
-    payload = {
-        "jsonrpc": "2.0",
-        "method": "eth_getBlockByNumber",
-        "params": ["latest", True],
-        "id": 1
-    }
-    response = requests.post(INFURA_URL, json=payload)
-    data = response.json()
-
-    if "result" not in data or not data["result"]:
-        raise Exception("❌ Could not fetch latest block data.")
-
-    block = data["result"]
-
-    block_number = int(block["number"], 16)
-    gas_limit = int(block["gasLimit"], 16)
-
-    # Calculate average gas price from transactions
-    gas_prices = []
-    for tx in block["transactions"]:
-        if "gasPrice" in tx:
-            gas_prices.append(int(tx["gasPrice"], 16))
-
-    avg_gas_price = sum(gas_prices) / len(gas_prices) if gas_prices else 0
-
-    timestamp = datetime.fromtimestamp(int(block["timestamp"], 16), tz=timezone.utc)
-
-    return {
-        "block_number": block_number,
-        "gas_price": avg_gas_price,
-        "gas_limit": gas_limit,
-        "timestamp": timestamp
-    }
-
-
-# -------------------------
-# MAIN COLLECTION LOOP
-# -------------------------
+# ==============================
+# Collect Ethereum Data
+# ==============================
 def collect_data():
-    """Continuously fetch and store Ethereum gas fee data every minute."""
     print("🚀 Starting Ethereum gas fee collector...")
     init_db()
 
-    while True:
-        try:
-            latest_block_data = get_latest_block()
-            save_to_db(latest_block_data)
-        except Exception as e:
-            print(f"❌ Error collecting data: {e}")
+    # Get latest block number
+    response = requests.post(INFURA_URL, json={
+        "jsonrpc": "2.0",
+        "method": "eth_blockNumber",
+        "params": [],
+        "id": 1
+    }).json()
 
-        print("⏳ Waiting 60 seconds before next fetch...\n")
-        time.sleep(60)  # wait for 1 minute
+    latest_block_number = response["result"]
 
+    # Get latest block data
+    block_data = requests.post(INFURA_URL, json={
+        "jsonrpc": "2.0",
+        "method": "eth_getBlockByNumber",
+        "params": [latest_block_number, True],
+        "id": 1
+    }).json()["result"]
+
+    # Extract fields
+    timestamp = datetime.fromtimestamp(int(block_data["timestamp"], 16), tz=timezone.utc)
+    base_fee_wei = int(block_data.get("baseFeePerGas", "0x0"), 16)
+    base_fee_gwei = Decimal(base_fee_wei) / Decimal(1e9)
+    gas_used = int(block_data["gasUsed"], 16)
+    gas_limit = int(block_data["gasLimit"], 16)
+    tx_count = len(block_data["transactions"])
+
+    # Save to DB
+    save_to_db((timestamp, base_fee_gwei, gas_used, gas_limit, tx_count))
 
 if __name__ == "__main__":
     collect_data()
