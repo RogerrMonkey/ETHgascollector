@@ -3,6 +3,8 @@ import psycopg2
 import requests
 from datetime import datetime, timezone
 from decimal import Decimal
+import time
+from web3 import Web3
 
 # ==============================
 # Database Config (Railway ENV)
@@ -16,9 +18,294 @@ DB_CONFIG = {
 }
 
 # ==============================
-# Infura Config
+# Ethereum & Contract Config
 # ==============================
-INFURA_URL = "https://sepolia.infura.io/v3/ab261d9c903d4bd1944bc549681c3d68"
+INFURA_RPC_URL = "https://sepolia.infura.io/v3/ab261d9c903d4bd1944bc549681c3d68"
+PRIVATE_KEY = os.getenv("PRIVATE_KEY")
+WALLET_ADDRESS = os.getenv("WALLET_ADDRESS")
+CONTRACT_ADDRESS = "0x3a77498d7BB9855c03ce60bDf7e7baae6A603bC5"
+
+MIN_GAS_PRICE_WEI = int(0.4 * 1e9)  # 0.4 gwei
+CHECK_INTERVAL = 60  # seconds
+
+# ==============================
+# Contract ABI (Hardcoded)
+# ==============================
+CONTRACT_ABI = [
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "_minGasPriceWei",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "constructor"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "to",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      }
+    ],
+    "name": "Cancelled",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "from",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "to",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      }
+    ],
+    "name": "Deposited",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "to",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      }
+    ],
+    "name": "Sent",
+    "type": "event"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      }
+    ],
+    "name": "cancelDeposit",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address payable",
+        "name": "recipient",
+        "type": "address"
+      }
+    ],
+    "name": "depositFunds",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "payable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "depositToSelf",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "payable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "name": "deposits",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "depositor",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "recipient",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "createdAt",
+        "type": "uint256"
+      },
+      {
+        "internalType": "enum GasOptimizedVault.Status",
+        "name": "status",
+        "type": "uint8"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      }
+    ],
+    "name": "getDeposit",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "depositor",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "recipient",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "createdAt",
+        "type": "uint256"
+      },
+      {
+        "internalType": "enum GasOptimizedVault.Status",
+        "name": "status",
+        "type": "uint8"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "getDepositCount",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "minGasPriceWei",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "id",
+        "type": "uint256"
+      }
+    ],
+    "name": "sendWhenGasLow",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "_minGasPriceWei",
+        "type": "uint256"
+      }
+    ],
+    "name": "setMinGasPrice",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  }
+]
+
+# ==============================
+# Init Web3
+# ==============================
+w3 = Web3(Web3.HTTPProvider(INFURA_RPC_URL))
+contract = w3.eth.contract(address=CONTRACT_ADDRESS, abi=CONTRACT_ABI)
 
 # ==============================
 # DB Setup
@@ -42,7 +329,7 @@ def init_db():
     print("✅ Database initialized or already exists.")
 
 # ==============================
-# Save Data to DB
+# Save Gas Data
 # ==============================
 def save_to_db(row):
     conn = psycopg2.connect(**DB_CONFIG)
@@ -57,24 +344,20 @@ def save_to_db(row):
     print(f"💾 Data saved: {row}")
 
 # ==============================
-# Collect Ethereum Data
+# Ethereum Data Collection
 # ==============================
-def collect_data():
-    print("🚀 Starting Ethereum gas fee collector...")
-    init_db()
-
+def collect_gas_data():
     # Get latest block number
-    response = requests.post(INFURA_URL, json={
+    response = requests.post(INFURA_RPC_URL, json={
         "jsonrpc": "2.0",
         "method": "eth_blockNumber",
         "params": [],
         "id": 1
     }).json()
-
     latest_block_number = response["result"]
 
     # Get latest block data
-    block_data = requests.post(INFURA_URL, json={
+    block_data = requests.post(INFURA_RPC_URL, json={
         "jsonrpc": "2.0",
         "method": "eth_getBlockByNumber",
         "params": [latest_block_number, True],
@@ -89,8 +372,57 @@ def collect_data():
     gas_limit = int(block_data["gasLimit"], 16)
     tx_count = len(block_data["transactions"])
 
-    # Save to DB
     save_to_db((timestamp, base_fee_gwei, gas_used, gas_limit, tx_count))
 
+# ==============================
+# Contract Interaction
+# ==============================
+def get_pending_deposits():
+    pending_ids = []
+    deposit_count = contract.functions.getDepositCount().call()
+    for deposit_id in range(deposit_count):
+        _, _, _, _, status = contract.functions.getDeposit(deposit_id).call()
+        if status == 0:  # Pending
+            pending_ids.append(deposit_id)
+    return pending_ids
+
+def send_transaction(deposit_id):
+    nonce = w3.eth.get_transaction_count(WALLET_ADDRESS)
+    txn = contract.functions.sendWhenGasLow(deposit_id).build_transaction({
+        "from": WALLET_ADDRESS,
+        "nonce": nonce,
+        "gas": 200000,
+        "gasPrice": w3.eth.gas_price
+    })
+    signed_txn = w3.eth.account.sign_transaction(txn, private_key=PRIVATE_KEY)
+    tx_hash = w3.eth.send_raw_transaction(signed_txn.rawTransaction)
+    print(f"✅ Sent tx for deposit {deposit_id}: {tx_hash.hex()}")
+
+# ==============================
+# Main Loop
+# ==============================
 if __name__ == "__main__":
-    collect_data()
+    print("🚀 Collector + Sender started...")
+    init_db()
+
+    while True:
+        try:
+            # Step 1: Collect & save gas data
+            collect_gas_data()
+
+            # Step 2: Check gas price
+            gas_price = w3.eth.gas_price
+            print(f"⛽ Current Gas Price: {gas_price / 1e9:.2f} gwei")
+
+            if gas_price <= MIN_GAS_PRICE_WEI:
+                print("✅ Gas price low — sending pending deposits...")
+                pending_ids = get_pending_deposits()
+                for deposit_id in pending_ids:
+                    send_transaction(deposit_id)
+            else:
+                print("❌ Gas price too high, waiting...")
+
+        except Exception as e:
+            print(f"⚠️ Error: {e}")
+
+        time.sleep(CHECK_INTERVAL)
