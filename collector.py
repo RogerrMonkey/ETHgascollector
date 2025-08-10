@@ -18,7 +18,7 @@ DB_CONFIG = {
 # ==============================
 # Infura Config
 # ==============================
-INFURA_URL = "https://mainnet.infura.io/v3/ab261d9c903d4bd1944bc549681c3d68"
+INFURA_URL = "https://sepolia.infura.io/v3/ab261d9c903d4bd1944bc549681c3d68"
 
 # ==============================
 # DB Setup
